@@ -153,9 +153,11 @@ void benchmark_encrypt_armv7(uint8_t heart_rate, uint8_t spo2, uint8_t temperatu
 	unsigned long long message_len = DATA_LEN;
 	unsigned char associated_data[ASCON_ASSOCIATED_DATALENGTH] = ASCON_ASSOCIATED_DATA;
 	unsigned long long associated_data_len = ASCON_ASSOCIATED_DATALENGTH;
-	unsigned char nonce[ASCON_NONCE_SIZE] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x01,
-												0x02, 0x03, 0x04, 0x05, 0x01, 0x02,
-												0x03, 0x04, 0x05, 0x06};
+	unsigned char nonce[ASCON_NONCE_SIZE] = {
+	    0xA3, 0x5F, 0x91, 0x0D, 0xE7, 0x4C,
+	    0x2B, 0xD8, 0x39, 0xFA, 0x6E, 0x12,
+	    0xC4, 0x87, 0x5D, 0x3A
+	};
 	uint32_t start_cycles = DWT->CYCCNT;
 	armv7_ascon_aead_encrypt(ciphertext, ciphertext, message, message_len, associated_data, associated_data_len, NULL, secret_key);
 	uint32_t end_cycles = DWT->CYCCNT;
@@ -213,13 +215,6 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-
-//	  if (status == HAL_OK)
-//	  {
-//		  HAL_UART_Transmit(&huart2, rx_buffer, TOTAL_RECEIVE_KEY_FROM_ESP32, HAL_MAX_DELAY);
-//		  debug = 1;
-//		  HAL_Delay(500);
-//	  }
 	  switch (state)
 	  {
 	  	  case STATE_WAIT_TRIGGER: {
@@ -267,9 +262,6 @@ int main(void)
 					  uint16_t received_crc = ((uint16_t)rx_buffer[57] << 8) | rx_buffer[58];
 					  uint16_t expected_crc = Compute_CRC16(secret_key, SECRET_KEY_SIZE);
 
-					  mocker1 = (uint8_t)received_crc;
-					  mocker2 = (uint8_t)(received_crc >> 8);
-
 					  if (received_crc == expected_crc) {
 						  debug = 3;
 						  state = STATE_COLLECT_AND_SEND;
@@ -305,17 +297,18 @@ int main(void)
 			  uint32_t cycles = end_cycles - start_cycles;
 			  time_frame_construct_us = (float)cycles / (SystemCoreClock / 1000000.0) - time_encrypt_us;
 
-			  benchmark_encrypt(heart_rate, spo2, temperature, acceleration, dataLen + ASCON_TAG_SIZE, encrypt_key);
-			  benchmark_encrypt_aes();
-			  benchmark_encrypt_armv7(heart_rate, spo2, temperature, acceleration, dataLen + ASCON_TAG_SIZE, encrypt_key);
+//			  benchmark_encrypt(heart_rate, spo2, temperature, acceleration, dataLen + ASCON_TAG_SIZE, encrypt_key);
+//			  benchmark_encrypt_aes();
+//			  benchmark_encrypt_armv7(heart_rate, spo2, temperature, acceleration, dataLen + ASCON_TAG_SIZE, encrypt_key);
 
 			  uint8_t* frameBytes = (uint8_t*)&frame;
 
-			  for (size_t i = 0; i < sizeof(Frame_t); i++)
-			  {
-				  HAL_UART_Transmit(&huart2, &frameBytes[i], 1, HAL_MAX_DELAY);
-				  HAL_Delay(1);
-			  }
+//			  for (size_t i = 0; i < sizeof(Frame_t); i++)
+//			  {
+//				  HAL_UART_Transmit(&huart2, &frameBytes[i], 1, HAL_MAX_DELAY);
+//				  HAL_Delay(1);
+//			  }
+			  HAL_UART_Transmit(&huart2, frameBytes, sizeof(Frame_t), HAL_MAX_DELAY);
 
 			  state = STATE_WAIT_TRIGGER;
 			  break;

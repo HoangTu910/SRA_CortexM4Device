@@ -16,9 +16,11 @@ Frame_t construct_frame(uint8_t heart_rate, uint8_t spo2, uint8_t temperature,
     unsigned long long message_len = DATA_LEN;
     unsigned char associated_data[ASCON_ASSOCIATED_DATALENGTH] = ASCON_ASSOCIATED_DATA;
     unsigned long long associated_data_len = ASCON_ASSOCIATED_DATALENGTH;
-    unsigned char nonce[ASCON_NONCE_SIZE] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x01,
-												0x02, 0x03, 0x04, 0x05, 0x01, 0x02,
-												0x03, 0x04, 0x05, 0x06};
+    unsigned char nonce[ASCON_NONCE_SIZE] = {
+        0xA3, 0x5F, 0x91, 0x0D, 0xE7, 0x4C,
+        0x2B, 0xD8, 0x39, 0xFA, 0x6E, 0x12,
+        0xC4, 0x87, 0x5D, 0x3A
+    };
 //    nonce_counter++;
 //    memcpy(nonce, &nonce_counter, sizeof(nonce_counter));
 
