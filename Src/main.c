@@ -19,6 +19,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "crypto.h"
+#include <stdbool.h>
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "Device.h"
@@ -77,6 +78,7 @@ uint8_t rx_buffer[TOTAL_RECEIVE_KEY_FROM_ESP32 + 1] = {0};
 uint8_t secret_key[SECRET_KEY_SIZE];
 uint8_t errorState = STATE_ERROR_UNKNOWN;
 volatile uint8_t uart_rx_complete = 0;
+SystemState_t state = STATE_WAIT_TRIGGER;
 
 uint8_t key_aes[AES_KEY_SIZE_] = { 0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6,
                               0xab, 0xf7, 0x36, 0x28, 0x3e, 0x11, 0x7a, 0xdb };
@@ -106,6 +108,52 @@ void aes_encrypt();
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 UART_HandleTypeDef huart2;
+
+static void send_error(UART_HandleTypeDef* huart, uint8_t errorState) {
+    HAL_UART_Transmit(huart, &errorState, 1, 100); // Giảm timeout từ HAL_MAX_DELAY xuống 100ms
+}
+
+static bool check_header(uint8_t* buffer) {
+    return (buffer[0] == H1 && buffer[1] == H2);
+}
+
+static bool check_trailer(uint8_t* buffer, uint8_t pos1, uint8_t pos2) {
+    return (buffer[pos1] == T1 && buffer[pos2] == T2);
+}
+
+static bool process_trigger_packet(uint8_t* buffer, SystemState_t* state) {
+    if (!check_trailer(buffer, 3, 4)) {
+        send_error(&huart2, STATE_ERROR_TRAILER_MISMATCH);
+        return false;
+    }
+    *state = STATE_COLLECT_AND_SEND;
+    return true;
+}
+
+static bool process_key_exchange_packet(uint8_t* buffer, uint8_t* secret_key, SystemState_t* state) {
+    const uint8_t expected_identifier[4] = {0x01, 0x02, 0x03, 0x04};
+    if (memcmp(&buffer[3], expected_identifier, 4) != 0) {
+        send_error(&huart2, STATE_ERROR_WRONG_IDENTIFIER);
+        return false;
+    }
+
+    memcpy(secret_key, &buffer[7], SECRET_KEY_SIZE);
+
+    if (!check_trailer(buffer, 55, 56)) {
+        send_error(&huart2, STATE_ERROR_TRAILER_MISMATCH);
+        return false;
+    }
+
+    uint16_t received_crc = ((uint16_t)buffer[57] << 8) | buffer[58];
+    uint16_t expected_crc = Compute_CRC16(secret_key, SECRET_KEY_SIZE);
+    if (received_crc != expected_crc) {
+        send_error(&huart2, STATE_ERROR_UNKNOWN);
+        return false;
+    }
+
+    *state = STATE_COLLECT_AND_SEND;
+    return true;
+}
 
 void generate_random_sensor_data(uint8_t *heart_rate, uint8_t *spo2, uint8_t *temperature, uint8_t *acceleration) {
     static int seeded = 0;
@@ -153,11 +201,6 @@ void benchmark_encrypt_armv7(uint8_t heart_rate, uint8_t spo2, uint8_t temperatu
 	unsigned long long message_len = DATA_LEN;
 	unsigned char associated_data[ASCON_ASSOCIATED_DATALENGTH] = ASCON_ASSOCIATED_DATA;
 	unsigned long long associated_data_len = ASCON_ASSOCIATED_DATALENGTH;
-	unsigned char nonce[ASCON_NONCE_SIZE] = {
-	    0xA3, 0x5F, 0x91, 0x0D, 0xE7, 0x4C,
-	    0x2B, 0xD8, 0x39, 0xFA, 0x6E, 0x12,
-	    0xC4, 0x87, 0x5D, 0x3A
-	};
 	uint32_t start_cycles = DWT->CYCCNT;
 	armv7_ascon_aead_encrypt(ciphertext, ciphertext, message, message_len, associated_data, associated_data_len, NULL, secret_key);
 	uint32_t end_cycles = DWT->CYCCNT;
@@ -190,7 +233,6 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-  SystemState_t state = STATE_WAIT_TRIGGER;
 
   /* USER CODE END SysInit */
 
@@ -199,13 +241,8 @@ int main(void)
   MX_USART2_UART_Init();
   enable_dwt();
   /* USER CODE BEGIN 2 */
-  uint8_t heart_rate;
-  uint8_t spo2;
-  uint8_t temperature;
-  uint8_t acceleration;
   uint16_t dataLen = 4;
   uint8_t private_key_for_generate[PRIVATE_GENERATE] = {0xA7, 0x1F, 0x3B, 0xC8, 0x56, 0xE4, 0x92, 0x7D};
-  uint8_t encrypt_key[SECRET_KEY_SIZE];
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -215,103 +252,48 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	  switch (state)
-	  {
-	  	  case STATE_WAIT_TRIGGER: {
+	  switch (state) {
+		  case STATE_WAIT_TRIGGER: {
 			  HAL_StatusTypeDef status = HAL_UART_Receive(&huart2, rx_buffer, TOTAL_RECEIVE_KEY_FROM_ESP32, 1000);
-			  debug = 12;
-
 			  if (status != HAL_OK) {
 				  break;
 			  }
 
-			  // Check header bytes
-			  if (rx_buffer[0] != H1 || rx_buffer[1] != H2) {
-				  errorState = STATE_ERROR_HEADER_MISMATCH;
-				  HAL_UART_Transmit(&huart2, &errorState, 1, HAL_MAX_DELAY);
+			  if (!check_header(rx_buffer)) {
+				  send_error(&huart2, STATE_ERROR_HEADER_MISMATCH);
 				  break;
 			  }
 
 			  uint8_t packetType = rx_buffer[2];
 			  if (packetType == 0x01) {
-				  debug = 1;
-				  // Check trailer bytes for simple packet
-				  if (rx_buffer[3] != T1 || rx_buffer[4] != T2) {
-					  errorState = STATE_ERROR_TRAILER_MISMATCH;
-					  HAL_UART_Transmit(&huart2, &errorState, 1, HAL_MAX_DELAY);
-					  break;
-				  }
-				  state = STATE_COLLECT_AND_SEND;
-			  }
-			  else {
-				  debug = 2;
-				  // Check identifier for complex packet
-				  const uint8_t expected_identifier[4] = {0x01, 0x02, 0x03, 0x04};
-				  if (memcmp(&rx_buffer[3], expected_identifier, 4) == 0) {
-					  // Copy secret key
-					  memcpy(secret_key, &rx_buffer[7], SECRET_KEY_SIZE);
-
-					  // Verify trailer bytes
-					  if (rx_buffer[55] != T1 || rx_buffer[56] != T2) {
-						  errorState = STATE_ERROR_TRAILER_MISMATCH;
-						  HAL_UART_Transmit(&huart2, &errorState, 1, HAL_MAX_DELAY);
-						  break;
-					  }
-
-					  // Calculate and verify CRC
-					  uint16_t received_crc = ((uint16_t)rx_buffer[57] << 8) | rx_buffer[58];
-					  uint16_t expected_crc = Compute_CRC16(secret_key, SECRET_KEY_SIZE);
-
-					  if (received_crc == expected_crc) {
-						  debug = 3;
-						  state = STATE_COLLECT_AND_SEND;
-					  }
-					  else {
-						  debug = 4;
-						  errorState = STATE_ERROR_UNKNOWN;
-						  HAL_UART_Transmit(&huart2, &errorState, 1, HAL_MAX_DELAY);
-					  }
-				  }
-				  else {
-					  debug = 5;
-					  errorState = STATE_ERROR_WRONG_IDENTIFIER;
-					  HAL_UART_Transmit(&huart2, &errorState, 1, HAL_MAX_DELAY);
-				  }
+				  process_trigger_packet(rx_buffer, &state);
+			  } else {
+				  process_key_exchange_packet(rx_buffer, secret_key, &state);
 			  }
 			  break;
 		  }
 
-		  case STATE_COLLECT_AND_SEND:
-			  debug = 5;
+		  case STATE_COLLECT_AND_SEND: {
+			  uint8_t heart_rate, spo2, temperature, acceleration;
 			  generate_random_sensor_data(&heart_rate, &spo2, &temperature, &acceleration);
 
+			  uint8_t encrypt_key[SECRET_KEY_SIZE];
 			  memcpy(encrypt_key, secret_key, SECRET_KEY_SIZE);
-
-			  for(int i = 0; i < SECRET_KEY_SIZE; i++) {
+			  for (int i = 0; i < SECRET_KEY_SIZE; i++) {
 				  encrypt_key[i] ^= private_key_for_generate[i % PRIVATE_GENERATE];
 			  }
-			  // Construct and send the frame
+
 			  uint32_t start_cycles = DWT->CYCCNT;
 			  Frame_t frame = construct_frame(heart_rate, spo2, temperature, acceleration, dataLen + ASCON_TAG_SIZE, encrypt_key);
 			  uint32_t end_cycles = DWT->CYCCNT;
-			  uint32_t cycles = end_cycles - start_cycles;
-			  time_frame_construct_us = (float)cycles / (SystemCoreClock / 1000000.0) - time_encrypt_us;
-
-//			  benchmark_encrypt(heart_rate, spo2, temperature, acceleration, dataLen + ASCON_TAG_SIZE, encrypt_key);
-//			  benchmark_encrypt_aes();
-//			  benchmark_encrypt_armv7(heart_rate, spo2, temperature, acceleration, dataLen + ASCON_TAG_SIZE, encrypt_key);
-
-			  uint8_t* frameBytes = (uint8_t*)&frame;
-
-//			  for (size_t i = 0; i < sizeof(Frame_t); i++)
-//			  {
-//				  HAL_UART_Transmit(&huart2, &frameBytes[i], 1, HAL_MAX_DELAY);
-//				  HAL_Delay(1);
-//			  }
-			  HAL_UART_Transmit(&huart2, frameBytes, sizeof(Frame_t), HAL_MAX_DELAY);
-
+			  time_frame_construct_us = (float)(end_cycles - start_cycles) / (SystemCoreClock / 1000000.0) - time_encrypt_us;
+			  //	benchmark_encrypt(heart_rate, spo2, temperature, acceleration, dataLen + ASCON_TAG_SIZE, encrypt_key);
+			  //	benchmark_encrypt_aes();
+			  //	benchmark_encrypt_armv7(heart_rate, spo2, temperature, acceleration, dataLen + ASCON_TAG_SIZE, encrypt_key);
+			  HAL_UART_Transmit(&huart2, (uint8_t*)&frame, sizeof(Frame_t), 100);
 			  state = STATE_WAIT_TRIGGER;
 			  break;
+		  }
 
 		  default:
 			  state = STATE_WAIT_TRIGGER;
