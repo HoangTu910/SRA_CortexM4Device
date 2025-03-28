@@ -8,6 +8,19 @@
 
 #define DATA_LEN 4
 
+void xor_permute(uint8_t *array, size_t size) {
+	static int seeded = 0;
+	if (!seeded) {
+		srand((unsigned int)time(NULL));
+		seeded = 1;
+	}
+    uint8_t key = (uint8_t)(rand());
+    for (size_t i = 0; i < size; i++) {
+        array[i] ^= key;
+        key = (key << 1) | (key >> 7); // Rotate key
+    }
+}
+
 Frame_t construct_frame(uint8_t heart_rate, uint8_t spo2, uint8_t temperature,
                         uint8_t acceleration, uint16_t dataLen, uint8_t *secret_key) {
     unsigned char ciphertext[DATA_LEN + ASCON_TAG_SIZE];
@@ -21,12 +34,8 @@ Frame_t construct_frame(uint8_t heart_rate, uint8_t spo2, uint8_t temperature,
         0x2B, 0xD8, 0x39, 0xFA, 0x6E, 0x12,
         0xC4, 0x87, 0x5D, 0x3A
     };
-//    nonce_counter++;
-//    memcpy(nonce, &nonce_counter, sizeof(nonce_counter));
 
-//    unsigned char key[ASCON_NONCE_SIZE] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x01,
-//                                           0x02, 0x03, 0x04, 0x05, 0x01, 0x02,
-//                                           0x03, 0x04, 0x05, 0x06};
+    xor_permute(nonce, sizeof(nonce));
 
     // Construct frame
     Frame_t frame = {0};
