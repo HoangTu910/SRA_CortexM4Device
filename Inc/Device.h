@@ -12,6 +12,7 @@
 #include <stddef.h>
 #include <string.h>
 #include "encrypt.h"
+#include "decrypt.h"
 
 // attributes
 #define ATT_PACKED __attribute__ ((__packed__))
@@ -23,8 +24,10 @@
 #define SET_FRAME_SUCCESS_STATUS(status) (status -= 2)
 #define IS_FRAME_ON_PROCESS_STATUS(status) ((status != FRAME_IDLE) && !(status % 3))
 #define TIMEOUT_DURATION 2000
-#define RX_BUFFER_SIZE 64
-#define SECRET_KEY_SIZE 48
+#define RX_BUFFER_SIZE 128
+#define SECRET_KEY_SIZE 64
+#define NONCE_SIZE 16
+#define AAD_SIZE 2
 
 #define H1 0xAB
 #define H2 0xCD
@@ -43,7 +46,14 @@
 
 #define HEADER_SIZE 2
 #define DEVICE_ID_SIZE 4
+#define AAD_SIZE 5
+#define SOF_SIZE 2
+#define AAD_MAX_SIZE_LEN 2
+#define AAD_MAX_SIZE 5
+#define SECRET_KEY_MAX_SIZE_LEN 2
+#define EOF_SIZE 2
 #define DATA_BYTE_LENGTH 2
+#define AUTH_TAG_SIZE 16
 #define DATA_PACKET_SIZE RAW_DATA_SIZE + ASCON_TAG_SIZE
 #define TRAILER_SIZE 2
 #define CRC_SIZE 2
@@ -51,7 +61,7 @@
 #define MAX_COUNTER 1000000
 #define PRIVATE_GENERATE 8
 
-#define TOTAL_RECEIVE_KEY_FROM_ESP32 SECRET_KEY_SIZE + CRC_SIZE + IDENTIFIER_ID_SIZE + 1 + HEADER_SIZE + TRAILER_SIZE // +1 for packet type
+#define TOTAL_RECEIVE_KEY_FROM_ESP32 114
 
 static const uint8_t DEVICE_ID[] = {0x01, 0x02, 0x03, 0x04};
 
@@ -65,7 +75,12 @@ typedef enum {
 	STATE_ERROR_MISMATCH_DATA = 0xFA,
 	STATE_ERROR_WRONG_IDENTIFIER = 0xFB,
 	STATE_ERROR_HEADER_MISMATCH = 0xDA,
-	STATE_ERROR_TRAILER_MISMATCH = 0xDB
+	STATE_ERROR_TRAILER_MISMATCH = 0xDB,
+	STATE_ERROR_NONCE_MISMATCH = 0xDC,
+	STATE_ERROR_INVALID_AAD_LENGTH = 0xDD,
+	STATE_ERROR_INVALID_SECRET_LENGTH = 0xDE,
+	STATE_ERROR_DECRYPTION_FAILED = 0xDF
+
 } ErrorState;
 
 #pragma pack(push, 1)  // Force byte alignment

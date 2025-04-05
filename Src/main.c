@@ -60,9 +60,9 @@ float time_encrypt_aes_us;
 float time_encrypt_armv7_us;
 uint8_t debug = 10;
 uint8_t debugIndex = 0;
-uint8_t mocker1 = 0;
-uint8_t mocker2 = 0;
-uint8_t mocker3 = 0;
+uint16_t mocker1 = 0;
+uint16_t mocker2 = 0;
+int mocker3 = 0;
 uint8_t mocker4 = 0;
 uint8_t mocker5 = 0;
 uint8_t mocker6 = 0;
@@ -76,6 +76,8 @@ volatile uint8_t rxByteReceived = 0;
 uint8_t rxIndex = 0;
 uint8_t rx_buffer[TOTAL_RECEIVE_KEY_FROM_ESP32 + 1] = {0};
 uint8_t secret_key[SECRET_KEY_SIZE];
+uint8_t aad_server[AAD_SIZE];
+uint8_t nonce_for_decrypt[NONCE_SIZE];
 uint8_t errorState = STATE_ERROR_UNKNOWN;
 volatile uint8_t uart_rx_complete = 0;
 SystemState_t state = STATE_WAIT_TRIGGER;
@@ -118,36 +120,126 @@ static bool check_header(uint8_t* buffer) {
 }
 
 static bool check_trailer(uint8_t* buffer, uint8_t pos1, uint8_t pos2) {
+	mocker1 = buffer[pos1];
+	mocker2 = buffer[pos2];
     return (buffer[pos1] == T1 && buffer[pos2] == T2);
 }
 
-static bool process_trigger_packet(uint8_t* buffer, SystemState_t* state) {
-    if (!check_trailer(buffer, 3, 4)) {
-        send_error(&huart2, STATE_ERROR_TRAILER_MISMATCH);
-        return false;
-    }
-    *state = STATE_COLLECT_AND_SEND;
-    return true;
-}
+static bool process_trigger_packet(uint8_t* buffer, uint8_t* aad, SystemState_t* state) {
+    const uint8_t expected_identifier[IDENTIFIER_ID_SIZE] = {0x01, 0x02, 0x03, 0x04}; // Example identifier
 
-static bool process_key_exchange_packet(uint8_t* buffer, uint8_t* secret_key, SystemState_t* state) {
-    const uint8_t expected_identifier[4] = {0x01, 0x02, 0x03, 0x04};
-    if (memcmp(&buffer[3], expected_identifier, 4) != 0) {
+    // Calculate offsets based on the structure
+    const size_t identifier_offset = SOF_SIZE;
+    const size_t trigger_offset = identifier_offset + IDENTIFIER_ID_SIZE;
+    const size_t aad_len_offset = trigger_offset + 1;
+    const size_t aad_offset = aad_len_offset + AAD_MAX_SIZE_LEN;
+    const size_t eof_offset = aad_offset + AAD_MAX_SIZE;
+
+    // Check identifier
+    if (memcmp(&buffer[identifier_offset], expected_identifier, IDENTIFIER_ID_SIZE) != 0) {
         send_error(&huart2, STATE_ERROR_WRONG_IDENTIFIER);
         return false;
     }
 
-    memcpy(secret_key, &buffer[7], SECRET_KEY_SIZE);
+    // Extract trigger signal (optional, if you need to validate it)
+    uint8_t trigger_signal = buffer[trigger_offset];
 
-    if (!check_trailer(buffer, 55, 56)) {
+    // Get AAD length (little-endian)
+    uint16_t aad_len = (uint16_t)buffer[aad_len_offset] | (buffer[aad_len_offset + 1] << 8);
+    if (aad_len > AAD_MAX_SIZE) {
+        send_error(&huart2, STATE_ERROR_INVALID_AAD_LENGTH);
+        return false;
+    }
+
+    // Copy AAD to output buffer
+    if (aad_len > 0) {
+        memcpy(aad, &buffer[aad_offset], aad_len);
+    }
+
+    // Check trailer (EOF)
+    if (!check_trailer(buffer, eof_offset, eof_offset + EOF_SIZE - 1)) {
         send_error(&huart2, STATE_ERROR_TRAILER_MISMATCH);
         return false;
     }
 
-    uint16_t received_crc = ((uint16_t)buffer[57] << 8) | buffer[58];
-    uint16_t expected_crc = Compute_CRC16(secret_key, SECRET_KEY_SIZE);
-    if (received_crc != expected_crc) {
-        send_error(&huart2, STATE_ERROR_UNKNOWN);
+    *state = STATE_COLLECT_AND_SEND;
+    return true;
+}
+
+static bool process_key_exchange_packet(uint8_t* buffer, uint8_t* secret_key, uint8_t* aad, SystemState_t* state) {
+    const uint8_t expected_identifier[IDENTIFIER_ID_SIZE] = {0x01, 0x02, 0x03, 0x04};
+    uint8_t encrypted_secret_key[SECRET_KEY_SIZE];
+    uint8_t nonce[NONCE_SIZE];
+    uint8_t received_auth_tag[AUTH_TAG_SIZE];
+    uint8_t preshared_key[16] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+                                0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F};
+
+    // Calculate offsets based on the structure
+    const size_t identifier_offset = SOF_SIZE + 1;
+    const size_t nonce_offset = identifier_offset + IDENTIFIER_ID_SIZE;
+    const size_t aad_len_offset = nonce_offset + NONCE_SIZE;
+    const size_t aad_offset = aad_len_offset + AAD_MAX_SIZE_LEN;
+
+    // Check identifier
+    if (memcmp(&buffer[identifier_offset], expected_identifier, IDENTIFIER_ID_SIZE) != 0) {
+        send_error(&huart2, STATE_ERROR_WRONG_IDENTIFIER);
+        return false;
+    }
+
+    // Copy nonce
+    memcpy(nonce, &buffer[nonce_offset], NONCE_SIZE);
+
+    // Get AAD length (little-endian)
+    uint16_t aad_len = (uint16_t)(buffer[aad_len_offset] & 0xFF) | (buffer[aad_len_offset + 1] >> 8);
+    mocker2 = aad_len;
+    if (aad_len > AAD_MAX_SIZE) {
+        send_error(&huart2, STATE_ERROR_INVALID_AAD_LENGTH);
+        return false;
+    }
+
+    // Copy AAD
+    memcpy(aad, &buffer[aad_offset], aad_len);
+
+    // Calculate secret key length offset and get length
+    const size_t secret_len_offset = aad_offset + aad_len;
+    uint16_t secret_len = (uint16_t)buffer[secret_len_offset] |
+                         (buffer[secret_len_offset + 1] << 8);
+    mocker1 = secret_len;
+    if (secret_len > SECRET_KEY_SIZE) {
+        send_error(&huart2, STATE_ERROR_INVALID_SECRET_LENGTH);
+        return false;
+    }
+
+    // Copy encrypted secret key and authentication tag
+    const size_t secret_offset = secret_len_offset + SECRET_KEY_MAX_SIZE_LEN;
+    const size_t auth_tag_offset = secret_offset + secret_len;
+    memcpy(encrypted_secret_key, &buffer[secret_offset], secret_len);
+    memcpy(received_auth_tag, &buffer[auth_tag_offset], AUTH_TAG_SIZE);
+
+    // Check trailer (EOF)
+    const size_t eof_offset = auth_tag_offset + AUTH_TAG_SIZE;
+    if (!check_trailer(buffer, eof_offset, eof_offset + EOF_SIZE - 1)) {
+        send_error(&huart2, STATE_ERROR_TRAILER_MISMATCH);
+        return false;
+    }
+
+    // Decrypt and verify
+    unsigned long long decrypted_len;
+    int result = crypto_aead_decrypt(
+        secret_key,           // Output: decrypted secret key
+        &decrypted_len,       // Output: length of decrypted data
+		NULL,    			// Output: computed authentication tag
+        encrypted_secret_key, // Input: ciphertext
+        secret_len,          // Input: ciphertext length
+        aad,                 // Input: additional authenticated data
+        aad_len,             // Input: AAD length
+        nonce,               // Input: nonce (using the parameter instead of nonce_for_decrypt)
+        preshared_key        // Input: key
+    );
+    // Check decryption result and verify authentication tag
+    if (result != 0) {
+        send_error(&huart2, STATE_ERROR_DECRYPTION_FAILED);
+        mocker3 = result;
         return false;
     }
 
@@ -266,9 +358,9 @@ int main(void)
 
 			  uint8_t packetType = rx_buffer[2];
 			  if (packetType == 0x01) {
-				  process_trigger_packet(rx_buffer, &state);
+				  process_trigger_packet(rx_buffer, aad_server, &state);
 			  } else {
-				  process_key_exchange_packet(rx_buffer, secret_key, &state);
+				  process_key_exchange_packet(rx_buffer, secret_key, aad_server, &state);
 			  }
 			  break;
 		  }
