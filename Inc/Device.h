@@ -88,8 +88,9 @@ typedef struct {
     uint8_t header[HEADER_SIZE];
     uint8_t deviceId[DEVICE_ID_SIZE];
     uint8_t nonce[ASCON_NONCE_SIZE];
-    uint8_t dataLenght[DATA_BYTE_LENGTH];
-    uint8_t dataPacket[DATA_PACKET_SIZE];
+    uint8_t data_length[DATA_BYTE_LENGTH];
+    uint8_t data_packet[DATA_PACKET_SIZE];
+    uint8_t auth_tag[AUTH_TAG_SIZE];
     uint8_t trailer[TRAILER_SIZE];
     uint8_t crc[CRC_SIZE];
 } Frame_t;
@@ -100,7 +101,7 @@ uint16_t Compute_CRC16(uint8_t *bytes, const int32_t BYTES_LEN);
 
 //Generate random data
 void generate_random_sensor_data(uint8_t *heart_rate, uint8_t *spo2, uint8_t *temperature, uint8_t *acceleration);
-Frame_t construct_frame(uint8_t heart_rate, uint8_t spo2, uint8_t temperature, uint8_t acceleration, uint16_t dataLen, uint8_t *secret_key);
+Frame_t construct_frame(uint8_t heart_rate, uint8_t spo2, uint8_t temperature, uint8_t acceleration, uint16_t dataLen, uint8_t *secret_key, uint8_t *aad, uint16_t aad_length);
 void benchmark_encrypt(uint8_t heart_rate, uint8_t spo2, uint8_t temperature, uint8_t acceleration, uint16_t dataLen, uint8_t *secret_key);
 
 #endif /* INC_DESIOT_DEVICE_H_ */

@@ -75,8 +75,9 @@ uint8_t mocker10 = 0;
 volatile uint8_t rxByteReceived = 0;
 uint8_t rxIndex = 0;
 uint8_t rx_buffer[TOTAL_RECEIVE_KEY_FROM_ESP32 + 1] = {0};
-uint8_t secret_key[SECRET_KEY_SIZE];
+uint8_t secret_key[SECRET_KEY_SIZE - AUTH_TAG_SIZE];
 uint8_t aad_server[AAD_SIZE];
+uint16_t aad_length;
 uint8_t nonce_for_decrypt[NONCE_SIZE];
 uint8_t errorState = STATE_ERROR_UNKNOWN;
 volatile uint8_t uart_rx_complete = 0;
@@ -150,6 +151,7 @@ static bool process_trigger_packet(uint8_t* buffer, uint8_t* aad, SystemState_t*
         send_error(&huart2, STATE_ERROR_INVALID_AAD_LENGTH);
         return false;
     }
+    aad_length = aad_len;
 
     // Copy AAD to output buffer
     if (aad_len > 0) {
@@ -239,7 +241,6 @@ static bool process_key_exchange_packet(uint8_t* buffer, uint8_t* secret_key, ui
     // Check decryption result and verify authentication tag
     if (result != 0) {
         send_error(&huart2, STATE_ERROR_DECRYPTION_FAILED);
-        mocker3 = result;
         return false;
     }
 
@@ -334,7 +335,6 @@ int main(void)
   enable_dwt();
   /* USER CODE BEGIN 2 */
   uint16_t dataLen = 4;
-  uint8_t private_key_for_generate[PRIVATE_GENERATE] = {0xA7, 0x1F, 0x3B, 0xC8, 0x56, 0xE4, 0x92, 0x7D};
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -369,14 +369,14 @@ int main(void)
 			  uint8_t heart_rate, spo2, temperature, acceleration;
 			  generate_random_sensor_data(&heart_rate, &spo2, &temperature, &acceleration);
 
-			  uint8_t encrypt_key[SECRET_KEY_SIZE];
-			  memcpy(encrypt_key, secret_key, SECRET_KEY_SIZE);
-			  for (int i = 0; i < SECRET_KEY_SIZE; i++) {
-				  encrypt_key[i] ^= private_key_for_generate[i % PRIVATE_GENERATE];
-			  }
-
+			  uint8_t encrypt_key[SECRET_KEY_SIZE - AUTH_TAG_SIZE];
+			  memcpy(encrypt_key, secret_key, SECRET_KEY_SIZE - AUTH_TAG_SIZE);
+//			  for (int i = 0; i < SECRET_KEY_SIZE; i++) {
+//				  encrypt_key[i] ^= private_key_for_generate[i % PRIVATE_GENERATE];
+//			  }
+			  mocker10 = encrypt_key[0];
 			  uint32_t start_cycles = DWT->CYCCNT;
-			  Frame_t frame = construct_frame(heart_rate, spo2, temperature, acceleration, dataLen + ASCON_TAG_SIZE, encrypt_key);
+			  Frame_t frame = construct_frame(heart_rate, spo2, temperature, acceleration, dataLen + ASCON_TAG_SIZE, encrypt_key, aad_server, aad_length);
 			  uint32_t end_cycles = DWT->CYCCNT;
 			  time_frame_construct_us = (float)(end_cycles - start_cycles) / (SystemCoreClock / 1000000.0) - time_encrypt_us;
 			  //	benchmark_encrypt(heart_rate, spo2, temperature, acceleration, dataLen + ASCON_TAG_SIZE, encrypt_key);

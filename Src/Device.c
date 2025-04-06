@@ -22,13 +22,12 @@ void xor_permute(uint8_t *array, size_t size) {
 }
 
 Frame_t construct_frame(uint8_t heart_rate, uint8_t spo2, uint8_t temperature,
-                        uint8_t acceleration, uint16_t dataLen, uint8_t *secret_key) {
+                        uint8_t acceleration, uint16_t dataLen_param, uint8_t *secret_key, uint8_t *aad, uint16_t aad_length) {
     unsigned char ciphertext[DATA_LEN + ASCON_TAG_SIZE];
     unsigned long long ciphertext_len;
     unsigned char message[DATA_LEN] = {heart_rate, spo2, temperature, acceleration};
     unsigned long long message_len = DATA_LEN;
-    unsigned char associated_data[ASCON_ASSOCIATED_DATALENGTH] = ASCON_ASSOCIATED_DATA;
-    unsigned long long associated_data_len = ASCON_ASSOCIATED_DATALENGTH;
+    unsigned long long associated_data_len = 5;
     unsigned char nonce[ASCON_NONCE_SIZE] = {
         0xA3, 0x5F, 0x91, 0x0D, 0xE7, 0x4C,
         0x2B, 0xD8, 0x39, 0xFA, 0x6E, 0x12,
@@ -43,23 +42,24 @@ Frame_t construct_frame(uint8_t heart_rate, uint8_t spo2, uint8_t temperature,
     frame.header[1] = H2;
     memcpy(frame.deviceId, DEVICE_ID, DEVICE_ID_SIZE);
     memcpy(frame.nonce, nonce, ASCON_NONCE_SIZE);
-    frame.dataLenght[0] = (uint8_t)(dataLen >> 8);
-    frame.dataLenght[1] = (uint8_t)(dataLen & 0xFF);
 
     // Encrypt data
     if (crypto_aead_encrypt(ciphertext, &ciphertext_len, message, message_len,
-                            associated_data, associated_data_len, NULL, nonce, secret_key) != 0) {
-        // Error handling (e.g., return an invalid frame)
+                            aad, associated_data_len, NULL, nonce, secret_key) != 0) {
         frame.header[0] = STATE_ERROR_UNKNOWN;
         return frame;
     }
 
-    memcpy(frame.dataPacket, ciphertext, ciphertext_len);
+    size_t encrypted_data_length = ciphertext_len;
+    frame.data_length[0] = (uint8_t)(encrypted_data_length >> 8);
+    frame.data_length[1] = (uint8_t)(encrypted_data_length & 0xFF);
+    memcpy(frame.data_packet, ciphertext, encrypted_data_length);
+    memcpy(frame.auth_tag, ciphertext + (encrypted_data_length - AUTH_TAG_SIZE), AUTH_TAG_SIZE);
     frame.trailer[0] = T1;
     frame.trailer[1] = T2;
 
-    // Compute CRC over encrypted data
-    uint16_t crc16 = Compute_CRC16(frame.dataPacket, ciphertext_len);
+    uint8_t *crc_start = (uint8_t *)frame.data_packet;
+    uint16_t crc16 = Compute_CRC16(crc_start, encrypted_data_length);
     frame.crc[0] = (uint8_t)(crc16 >> 8);
     frame.crc[1] = (uint8_t)(crc16 & 0xFF);
 
