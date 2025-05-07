@@ -56,8 +56,10 @@ UART_HandleTypeDef huart2;
 /*Mocker for debugging*/
 float time_encrypt_us;
 float time_frame_construct_us;
+float time_frame_transmit_us;
 float time_encrypt_aes_us;
 float time_encrypt_armv7_us;
+float time_parsing_frame_us;
 uint8_t debug = 10;
 uint8_t debugIndex = 0;
 uint16_t mocker1 = 0;
@@ -73,7 +75,8 @@ uint8_t mocker10 = 0;
 /*Mocker for debugging*/
 
 volatile uint8_t rxByteReceived = 0;
-uint8_t rxIndex = 0;
+volatile uint32_t rx_index = 0;
+volatile uint8_t rx_complete = 0;
 uint8_t rx_buffer[TOTAL_RECEIVE_KEY_FROM_ESP32 + 1] = {0};
 uint8_t secret_key[SECRET_KEY_SIZE - AUTH_TAG_SIZE];
 uint8_t aad_server[AAD_SIZE];
@@ -82,7 +85,7 @@ uint8_t nonce_for_decrypt[NONCE_SIZE];
 uint8_t errorState = STATE_ERROR_UNKNOWN;
 volatile uint8_t uart_rx_complete = 0;
 SystemState_t state = STATE_WAIT_TRIGGER;
-
+uint16_t dataLen = 4;
 uint8_t key_aes[AES_KEY_SIZE_] = { 0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6,
                               0xab, 0xf7, 0x36, 0x28, 0x3e, 0x11, 0x7a, 0xdb };
 
@@ -165,6 +168,24 @@ static bool process_trigger_packet(uint8_t* buffer, uint8_t* aad, SystemState_t*
     }
 
     *state = STATE_COLLECT_AND_SEND;
+    mocker8 = 11;
+	uint8_t heart_rate, spo2, temperature, acceleration;
+	generate_random_sensor_data(&heart_rate, &spo2, &temperature, &acceleration);
+
+	uint8_t encrypt_key[SECRET_KEY_SIZE - AUTH_TAG_SIZE];
+	memcpy(encrypt_key, secret_key, SECRET_KEY_SIZE - AUTH_TAG_SIZE);
+	benchmark_encrypt(heart_rate, spo2, temperature, acceleration, dataLen + ASCON_TAG_SIZE, encrypt_key);
+	uint32_t start_cycles = DWT->CYCCNT;
+	Frame_t frame = construct_frame(heart_rate, spo2, temperature, acceleration, dataLen + ASCON_TAG_SIZE, encrypt_key, aad_server, aad_length);
+	uint32_t end_cycles = DWT->CYCCNT;
+	time_frame_construct_us = (float)(end_cycles - start_cycles) / (SystemCoreClock / 1000000.0) - time_encrypt_us;
+	//	benchmark_encrypt_aes();
+	benchmark_encrypt_armv7(heart_rate, spo2, temperature, acceleration, dataLen + ASCON_TAG_SIZE, encrypt_key);
+	uint32_t start_cycles_ = DWT->CYCCNT;
+	HAL_UART_Transmit(&huart2, (uint8_t*)&frame, sizeof(Frame_t), 100);
+	uint32_t end_cycles_ = DWT->CYCCNT;
+	time_frame_transmit_us = (float)(end_cycles_ - start_cycles_) / (SystemCoreClock / 1000000.0);
+
     return true;
 }
 
@@ -192,8 +213,8 @@ static bool process_key_exchange_packet(uint8_t* buffer, uint8_t* secret_key, ui
     memcpy(nonce, &buffer[nonce_offset], NONCE_SIZE);
 
     // Get AAD length (little-endian)
-    uint16_t aad_len = (uint16_t)(buffer[aad_len_offset] & 0xFF) | (buffer[aad_len_offset + 1] >> 8);
-    mocker2 = aad_len;
+    uint16_t aad_len = (uint16_t)(buffer[aad_len_offset] & 0xFF) | ((uint16_t)buffer[aad_len_offset + 1] << 8);
+    mocker9 = aad_len;
     if (aad_len > AAD_MAX_SIZE) {
         send_error(&huart2, STATE_ERROR_INVALID_AAD_LENGTH);
         return false;
@@ -201,6 +222,10 @@ static bool process_key_exchange_packet(uint8_t* buffer, uint8_t* secret_key, ui
 
     // Copy AAD
     memcpy(aad, &buffer[aad_offset], aad_len);
+
+    mocker5 = aad[0];
+    mocker6 = aad[1];
+    mocker10 = aad[2];
 
     // Calculate secret key length offset and get length
     const size_t secret_len_offset = aad_offset + aad_len;
@@ -244,7 +269,7 @@ static bool process_key_exchange_packet(uint8_t* buffer, uint8_t* secret_key, ui
         return false;
     }
 
-    *state = STATE_COLLECT_AND_SEND;
+    *state = STATE_WAIT_TRIGGER;
     return true;
 }
 
@@ -333,8 +358,8 @@ int main(void)
   MX_GPIO_Init();
   MX_USART2_UART_Init();
   enable_dwt();
+  HAL_UART_Receive_IT(&huart2, rx_buffer, TOTAL_RECEIVE_KEY_FROM_ESP32);
   /* USER CODE BEGIN 2 */
-  uint16_t dataLen = 4;
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -344,53 +369,90 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	  switch (state) {
-		  case STATE_WAIT_TRIGGER: {
-			  HAL_StatusTypeDef status = HAL_UART_Receive(&huart2, rx_buffer, TOTAL_RECEIVE_KEY_FROM_ESP32, 1000);
-			  if (status != HAL_OK) {
-				  break;
-			  }
+	  HAL_SuspendTick();
+	  HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
+	  HAL_ResumeTick();
 
-			  if (!check_header(rx_buffer)) {
-				  send_error(&huart2, STATE_ERROR_HEADER_MISMATCH);
-				  break;
-			  }
-
-			  uint8_t packetType = rx_buffer[2];
-			  if (packetType == 0x01) {
-				  process_trigger_packet(rx_buffer, aad_server, &state);
-			  } else {
-				  process_key_exchange_packet(rx_buffer, secret_key, aad_server, &state);
-			  }
+	  if(rx_complete) {
+		  rx_complete = 0;
+		  uint32_t start_cycles = DWT->CYCCNT;
+		  if (!check_header(rx_buffer)) {
+			  send_error(&huart2, STATE_ERROR_HEADER_MISMATCH);
 			  break;
 		  }
 
-		  case STATE_COLLECT_AND_SEND: {
-			  uint8_t heart_rate, spo2, temperature, acceleration;
-			  generate_random_sensor_data(&heart_rate, &spo2, &temperature, &acceleration);
-
-			  uint8_t encrypt_key[SECRET_KEY_SIZE - AUTH_TAG_SIZE];
-			  memcpy(encrypt_key, secret_key, SECRET_KEY_SIZE - AUTH_TAG_SIZE);
-//			  for (int i = 0; i < SECRET_KEY_SIZE; i++) {
-//				  encrypt_key[i] ^= private_key_for_generate[i % PRIVATE_GENERATE];
-//			  }
-			  mocker10 = encrypt_key[0];
-			  uint32_t start_cycles = DWT->CYCCNT;
-			  Frame_t frame = construct_frame(heart_rate, spo2, temperature, acceleration, dataLen + ASCON_TAG_SIZE, encrypt_key, aad_server, aad_length);
-			  uint32_t end_cycles = DWT->CYCCNT;
-			  time_frame_construct_us = (float)(end_cycles - start_cycles) / (SystemCoreClock / 1000000.0) - time_encrypt_us;
-			  //	benchmark_encrypt(heart_rate, spo2, temperature, acceleration, dataLen + ASCON_TAG_SIZE, encrypt_key);
-			  //	benchmark_encrypt_aes();
-			  //	benchmark_encrypt_armv7(heart_rate, spo2, temperature, acceleration, dataLen + ASCON_TAG_SIZE, encrypt_key);
-			  HAL_UART_Transmit(&huart2, (uint8_t*)&frame, sizeof(Frame_t), 100);
-			  state = STATE_WAIT_TRIGGER;
-			  break;
+		  uint8_t packetType = rx_buffer[2];
+		  mocker7 = packetType;
+		  if (packetType == 0x01) {
+			  mocker8 = 9;
+			  process_trigger_packet(rx_buffer, aad_server, &state);
+		  } else {
+			  mocker8 = 10;
+			  process_key_exchange_packet(rx_buffer, secret_key, aad_server, &state);
 		  }
-
-		  default:
-			  state = STATE_WAIT_TRIGGER;
-			  break;
+		  uint32_t end_cycles = DWT->CYCCNT;
+		  uint32_t cycles = end_cycles - start_cycles;
+		  time_parsing_frame_us = (float)cycles / (SystemCoreClock / 1000000.0);
 	  }
+
+//	  switch (state) {
+//		  case STATE_WAIT_TRIGGER: {
+////			  HAL_StatusTypeDef status = HAL_UART_Receive(&huart2, rx_buffer, TOTAL_RECEIVE_KEY_FROM_ESP32, 100);
+////			  if (status != HAL_OK) {
+////				  break;
+////			  }
+//			  rx_complete = 0;
+//			  uint32_t start_cycles = DWT->CYCCNT;
+//			  if (!check_header(rx_buffer)) {
+//				  send_error(&huart2, STATE_ERROR_HEADER_MISMATCH);
+//				  break;
+//			  }
+//
+//			  uint8_t packetType = rx_buffer[2];
+//			  mocker7 = packetType;
+//			  if (packetType == 0x01) {
+//				  mocker8 = 9;
+//				  process_trigger_packet(rx_buffer, aad_server, &state);
+//			  } else {
+//				  mocker8 = 10;
+//				  process_key_exchange_packet(rx_buffer, secret_key, aad_server, &state);
+//			  }
+//			  uint32_t end_cycles = DWT->CYCCNT;
+//			  uint32_t cycles = end_cycles - start_cycles;
+//			  time_parsing_frame_us = (float)cycles / (SystemCoreClock / 1000000.0);
+//			  break;
+//		  }
+//
+//		  case STATE_COLLECT_AND_SEND: {
+//			  mocker8 = 11;
+//			  uint8_t heart_rate, spo2, temperature, acceleration;
+//			  generate_random_sensor_data(&heart_rate, &spo2, &temperature, &acceleration);
+//
+//			  uint8_t encrypt_key[SECRET_KEY_SIZE - AUTH_TAG_SIZE];
+//			  memcpy(encrypt_key, secret_key, SECRET_KEY_SIZE - AUTH_TAG_SIZE);
+////			  for (int i = 0; i < SECRET_KEY_SIZE; i++) {
+////				  encrypt_key[i] ^= private_key_for_generate[i % PRIVATE_GENERATE];
+////			  }
+////			  mocker10 = encrypt_key[0];
+//			  benchmark_encrypt(heart_rate, spo2, temperature, acceleration, dataLen + ASCON_TAG_SIZE, encrypt_key);
+//			  uint32_t start_cycles = DWT->CYCCNT;
+//			  Frame_t frame = construct_frame(heart_rate, spo2, temperature, acceleration, dataLen + ASCON_TAG_SIZE, encrypt_key, aad_server, aad_length);
+//			  uint32_t end_cycles = DWT->CYCCNT;
+//			  time_frame_construct_us = (float)(end_cycles - start_cycles) / (SystemCoreClock / 1000000.0) - time_encrypt_us;
+//			  //	benchmark_encrypt_aes();
+//			  benchmark_encrypt_armv7(heart_rate, spo2, temperature, acceleration, dataLen + ASCON_TAG_SIZE, encrypt_key);
+//			  uint32_t start_cycles_ = DWT->CYCCNT;
+//			  HAL_UART_Transmit(&huart2, (uint8_t*)&frame, sizeof(Frame_t), 100);
+//			  uint32_t end_cycles_ = DWT->CYCCNT;
+//			  time_frame_transmit_us = (float)(end_cycles_ - start_cycles_) / (SystemCoreClock / 1000000.0);
+//			  state = STATE_WAIT_TRIGGER;
+//			  break;
+//		  }
+//
+//		  default:
+//			  state = STATE_WAIT_TRIGGER;
+//			  break;
+//	  }
   }
   /* USER CODE END 3 */
 }
@@ -463,10 +525,12 @@ static void MX_USART2_UART_Init(void)
   {
     Error_Handler();
   }
+  __HAL_UART_ENABLE_IT(&huart2, UART_IT_RXNE);
+  HAL_NVIC_SetPriority(USART2_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(USART2_IRQn);
   /* USER CODE BEGIN USART2_Init 2 */
 
   /* USER CODE END USART2_Init 2 */
-
 }
 
 /**
@@ -564,6 +628,13 @@ void aes_gcm_encrypt()
     if (error_status != AES_SUCCESS) {
         while (1); // Handle error
     }
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
+	if (huart->Instance == USART2){
+		rx_complete = 1;
+		HAL_UART_Receive_IT(&huart2, rx_buffer, TOTAL_RECEIVE_KEY_FROM_ESP32);
+	}
 }
 
 /* USER CODE END 4 */
