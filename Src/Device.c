@@ -44,7 +44,7 @@ Frame_t construct_frame(uint8_t heart_rate, uint8_t spo2, uint8_t temperature,
     memcpy(frame.nonce, nonce, ASCON_NONCE_SIZE);
 
     // Encrypt data
-    if (crypto_aead_encrypt(ciphertext, &ciphertext_len, message, message_len,
+    if (armv7_crypto_aead_encrypt(ciphertext, &ciphertext_len, message, message_len,
                             aad, associated_data_len, NULL, nonce, secret_key) != 0) {
         frame.header[0] = STATE_ERROR_UNKNOWN;
         return frame;

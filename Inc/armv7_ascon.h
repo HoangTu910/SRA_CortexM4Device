@@ -36,13 +36,6 @@ void ascon_final(ascon_state_t* s, const ascon_key_t* k);
 
 #endif
 
-int armv7_ascon_aead_encrypt(uint8_t* t, uint8_t* c, const uint8_t* m, uint64_t mlen,
-                       const uint8_t* ad, uint64_t adlen, const uint8_t* npub,
-                       const uint8_t* k);
-int armv7_ascon_aead_decrypt(uint8_t* m, const uint8_t* t, const uint8_t* c,
-                       uint64_t clen, const uint8_t* ad, uint64_t adlen,
-                       const uint8_t* npub, const uint8_t* k);
-
 #endif
 
 #ifdef ASCON_HASH_BYTES

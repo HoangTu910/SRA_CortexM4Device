@@ -36,7 +36,7 @@ forceinline void ascon_initaead(ascon_state_t* s, const ascon_key_t* key,
   s->x[3] = LOAD(npub, 8);
   s->x[4] = LOAD(npub + 8, 8);
   printstate("init 1st key xor", s);
-  P(s, 12);
+  armv7_P(s, 12);
 #if CRYPTO_KEYBYTES == 16
   s->x[3] ^= key->x[0];
   s->x[4] ^= key->x[1];
@@ -173,7 +173,7 @@ forceinline void ascon_final(ascon_state_t* s, const ascon_key_t* key) {
   s->x[3] ^= KEYROT(key->x[2], 0);
 #endif
   printstate("final 1st key xor", s);
-  P(s, 12);
+  armv7_P(s, 12);
 #if CRYPTO_KEYBYTES == 16
   s->x[3] ^= key->x[0];
   s->x[4] ^= key->x[1];

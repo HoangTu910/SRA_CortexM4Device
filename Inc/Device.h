@@ -13,7 +13,7 @@
 #include <string.h>
 #include "encrypt.h"
 #include "decrypt.h"
-
+#include "armv7_aead.h"
 // attributes
 #define ATT_PACKED __attribute__ ((__packed__))
 #define ATT_UNUSED __attribute__((__unused__))
