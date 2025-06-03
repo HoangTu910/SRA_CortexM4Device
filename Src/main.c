@@ -54,6 +54,7 @@
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
+void resetUART(UART_HandleTypeDef *huart);
 
 /*Mocker for debugging*/
 float time_encrypt_us;
@@ -89,6 +90,7 @@ uint8_t errorState = STATE_ERROR_UNKNOWN;
 volatile uint8_t uart_rx_complete = 0;
 SystemState_t state = STATE_WAIT_TRIGGER;
 static uint16_t session_key_index = 0;
+uint8_t packetType;
 uint16_t dataLen = 4;
 uint8_t key_aes[AES_KEY_SIZE_] = { 0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6,
                               0xab, 0xf7, 0x36, 0x28, 0x3e, 0x11, 0x7a, 0xdb };
@@ -135,77 +137,142 @@ static bool check_trailer(uint8_t* buffer, uint8_t pos1, uint8_t pos2) {
     return (buffer[pos1] == T1 && buffer[pos2] == T2);
 }
 
-static bool process_trigger_packet(uint8_t* buffer, uint8_t* aad, SystemState_t* state) {
+static bool process_initial_packet(uint8_t* buffer) {
+    // Calculate offsets based on UartFrameSTM32Init structure
+    const size_t packet_type_offset = SOF_SIZE;  
+    const size_t identifier_offset = packet_type_offset + 1; 
+    const size_t data_offset = identifier_offset + IDENTIFIER_ID_SIZE; 
+    
+    // Check header first
+    if (!check_header(buffer)) {
+        send_error(&huart2, STATE_ERROR_HEADER_MISMATCH);
+        return false;
+    }
+    
+    // Verify packet type (should be 0x03 for initial packet)
+    if (buffer[packet_type_offset] != 0x03) {
+        send_error(&huart2, STATE_ERROR_WRONG_PACKET_TYPE);
+        return false;
+    }
+    
+    // Verify identifier
     const uint8_t expected_identifier[IDENTIFIER_ID_SIZE] = {0x01, 0x02, 0x03, 0x04};
+    if (memcmp(&buffer[identifier_offset], expected_identifier, IDENTIFIER_ID_SIZE) != 0) {
+        send_error(&huart2, STATE_ERROR_WRONG_IDENTIFIER);
+        return false;
+    }
+    
+    // Extract session_key_index from data field (big-endian)
+    session_key_index = (uint16_t)(buffer[data_offset] << 8) | buffer[data_offset + 1];
+    
+    // Verify EOF
+    const size_t eof_offset = data_offset + AAD_MAX_SIZE;
+    if (!check_trailer(buffer, eof_offset, eof_offset + EOF_SIZE - 1)) {
+        send_error(&huart2, STATE_ERROR_TRAILER_MISMATCH);
+        return false;
+    }
 
-    // Calculate offsets based on the structure
-    const size_t identifier_offset = SOF_SIZE;
-    const size_t trigger_offset = identifier_offset + IDENTIFIER_ID_SIZE;
-    const size_t aad_len_offset = trigger_offset + 1;
-    const size_t aad_offset = aad_len_offset + AAD_MAX_SIZE_LEN;
-    const size_t eof_offset = aad_offset + AAD_MAX_SIZE;
+    return true;
+}
 
-    // Check identifier
+static bool process_trigger_packet(uint8_t* buffer, uint8_t* aad, SystemState_t* state) {
+    // Check header first
+    if (!check_header(buffer)) {
+        send_error(&huart2, STATE_ERROR_HEADER_MISMATCH);
+        return false;
+    }
+
+    // Calculate offsets based on UartFrameSTM32Trigger structure
+    const size_t trigger_offset = SOF_SIZE; 
+    const size_t identifier_offset = trigger_offset + 1; l
+    const size_t aad_len_offset = identifier_offset + IDENTIFIER_ID_SIZE;  
+    const size_t aad_offset = aad_len_offset + AAD_MAX_SIZE_LEN;  
+    const size_t eof_offset = aad_offset + AAD_MAX_SIZE; 
+
+    // Extract trigger signal
+    uint8_t trigger_signal = buffer[trigger_offset];
+
+    // Verify identifier
+    const uint8_t expected_identifier[IDENTIFIER_ID_SIZE] = {0x01, 0x02, 0x03, 0x04};
     if (memcmp(&buffer[identifier_offset], expected_identifier, IDENTIFIER_ID_SIZE) != 0) {
         send_error(&huart2, STATE_ERROR_WRONG_IDENTIFIER);
         return false;
     }
 
-    // Extract trigger signal (optional, if you need to validate it)
-    uint8_t trigger_signal = buffer[trigger_offset];
-
     // Get AAD length (little-endian)
-    uint16_t aad_len = (uint16_t)buffer[aad_len_offset] | (buffer[aad_len_offset + 1] << 8);
+    uint16_t aad_len = (uint16_t)buffer[aad_len_offset] |
+                      ((uint16_t)buffer[aad_len_offset + 1] << 8);
     if (aad_len > AAD_MAX_SIZE) {
         send_error(&huart2, STATE_ERROR_INVALID_AAD_LENGTH);
         return false;
     }
     aad_length = aad_len;
 
-    // Copy AAD to output buffer
+    // Copy AAD if length > 0
     if (aad_len > 0) {
         memcpy(aad, &buffer[aad_offset], aad_len);
     }
 
-    // Check trailer (EOF)
+    // Verify EOF
     if (!check_trailer(buffer, eof_offset, eof_offset + EOF_SIZE - 1)) {
         send_error(&huart2, STATE_ERROR_TRAILER_MISMATCH);
         return false;
     }
 
+    // Process data and generate response
     *state = STATE_COLLECT_AND_SEND;
-	uint8_t heart_rate, spo2, temperature, acceleration;
-	generate_random_sensor_data(&heart_rate, &spo2, &temperature, &acceleration);
 
-	uint8_t encrypt_key[SECRET_KEY_SIZE - AUTH_TAG_SIZE];
-	memcpy(encrypt_key, secret_key, SECRET_KEY_SIZE - AUTH_TAG_SIZE);
+    // Generate sensor data
+    uint8_t heart_rate, spo2, temperature, acceleration;
+    generate_random_sensor_data(&heart_rate, &spo2, &temperature, &acceleration);
 
-	benchmark_encrypt(heart_rate, spo2, temperature, acceleration, dataLen + ASCON_TAG_SIZE, encrypt_key);
+    // Prepare encryption key
+    uint8_t encrypt_key[SECRET_KEY_SIZE - AUTH_TAG_SIZE];
+    memcpy(encrypt_key, secret_key, SECRET_KEY_SIZE - AUTH_TAG_SIZE);
 
-	uint8_t session_key[SECRET_KEY_SIZE - AUTH_TAG_SIZE];
+    // Benchmark encryption
+    benchmark_encrypt(heart_rate, spo2, temperature, acceleration,
+                     dataLen + ASCON_TAG_SIZE, encrypt_key);
 
-	uint32_t start_cycles_session = DWT->CYCCNT;
-	armv7_derive_session_key(session_key, SECRET_KEY_SIZE - AUTH_TAG_SIZE, encrypt_key, SECRET_KEY_SIZE - AUTH_TAG_SIZE, aad_server, aad_length, session_key_index++);
-	uint32_t end_cycles_session = DWT->CYCCNT;
-	time_frame_construct_session_key_us = (float)(end_cycles_session - start_cycles_session) / (SystemCoreClock / 1000000.0);
+    // Generate session key
+    uint8_t session_key[SECRET_KEY_SIZE - AUTH_TAG_SIZE];
 
-	if (session_key_index >= MAX_SESSION_KEYS) {
-		session_key_index = 0;
-	}
-	mocker8 = encrypt_key[0];
-	mocker9 = encrypt_key[1];
-	uint32_t start_cycles = DWT->CYCCNT;
-	Frame_t frame = construct_frame(heart_rate, spo2, temperature, acceleration, dataLen + ASCON_TAG_SIZE, session_key, aad_server, aad_length);
-	uint32_t end_cycles = DWT->CYCCNT;
-	time_frame_construct_us = (float)(end_cycles - start_cycles) / (SystemCoreClock / 1000000.0);
+    // Measure session key generation time
+    uint32_t start_cycles_session = DWT->CYCCNT;
+    // Update session key index based on packet type
+    packetType == 0x01 ? ++session_key_index : session_key_index;
+    // Generate new session key
+    armv7_derive_session_key(session_key, SECRET_KEY_SIZE - AUTH_TAG_SIZE,
+                            encrypt_key, SECRET_KEY_SIZE - AUTH_TAG_SIZE,
+                            aad_server, aad_length, session_key_index);
+    uint32_t end_cycles_session = DWT->CYCCNT;
+    time_frame_construct_session_key_us = (float)(end_cycles_session - start_cycles_session) /
+                                        (SystemCoreClock / 1000000.0);
 
-	//	benchmark_encrypt_aes();
-	//	benchmark_encrypt_armv7(heart_rate, spo2, temperature, acceleration, dataLen + ASCON_TAG_SIZE, encrypt_key);
+    // Handle session key index overflow
+    if (session_key_index >= MAX_SESSION_KEYS) {
+        session_key_index = 0;
+    }
 
-	uint32_t start_cycles_ = DWT->CYCCNT;
-	HAL_UART_Transmit(&huart2, (uint8_t*)&frame, sizeof(Frame_t), 100);
-	uint32_t end_cycles_ = DWT->CYCCNT;
-	time_frame_transmit_us = (float)(end_cycles_ - start_cycles_) / (SystemCoreClock / 1000000.0);
+    // Debug values
+    mocker8 = encrypt_key[0];
+    mocker9 = encrypt_key[1];
+
+    // Construct and send response frame
+    uint32_t start_cycles = DWT->CYCCNT;
+    Frame_t frame = construct_frame(heart_rate, spo2, temperature, acceleration,
+                                  dataLen + ASCON_TAG_SIZE, session_key,
+                                  aad_server, aad_length);
+    uint32_t end_cycles = DWT->CYCCNT;
+    time_frame_construct_us = (float)(end_cycles - start_cycles) /
+                             (SystemCoreClock / 1000000.0);
+
+    // Transmit frame
+    uint32_t start_cycles_ = DWT->CYCCNT;
+    HAL_UART_Transmit(&huart2, (uint8_t*)&frame, sizeof(Frame_t), 100);
+    uint32_t end_cycles_ = DWT->CYCCNT;
+    time_frame_transmit_us = (float)(end_cycles_ - start_cycles_) /
+                            (SystemCoreClock / 1000000.0);
 
     return true;
 }
@@ -344,6 +411,11 @@ void benchmark_encrypt_armv7(uint8_t heart_rate, uint8_t spo2, uint8_t temperatu
 	uint32_t cycles = end_cycles - start_cycles;
 	time_encrypt_armv7_us = (float)cycles / (SystemCoreClock / 1000000.0);
 }
+
+void resetUART(UART_HandleTypeDef *huart) {
+  HAL_UART_DeInit(huart);
+  HAL_UART_Init(huart);
+}
 /* USER CODE END 0 */
 
 /**
@@ -387,24 +459,38 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-//	  HAL_SuspendTick();
-//	  HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
-//	  HAL_ResumeTick();
+	  #ifdef OPTIMIZE
+		  HAL_SuspendTick();
+		  HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
+		  HAL_ResumeTick();
+	  #endif
 	  if(rx_complete) {
 		  rx_complete = 0;
+		  mocker6 = rx_buffer[0];
+		  if (huart2.ErrorCode != HAL_UART_ERROR_NONE) {
+			mocker10 = 1;
+			resetUART(&huart2);
+			memset(rx_buffer, 0, TOTAL_RECEIVE_KEY_FROM_ESP32);
+		  }
 		  uint32_t start_cycles = DWT->CYCCNT;
 		  if (!check_header(rx_buffer)) {
 			  send_error(&huart2, STATE_ERROR_HEADER_MISMATCH);
-			  break;
+			  HAL_UART_Receive_IT(&huart2, rx_buffer, TOTAL_RECEIVE_KEY_FROM_ESP32);
+			  continue;
 		  }
-
-		  uint8_t packetType = rx_buffer[2];
+		  packetType = rx_buffer[2];
 		  mocker7 = packetType;
-		  if (packetType == 0x01) {
+		  if (packetType == 0x01 || packetType == 0x04) {
 			  process_trigger_packet(rx_buffer, aad_server, &state);
-		  } else {
+		  }
+		  else if(packetType == 0x02){
 			  process_key_exchange_packet(rx_buffer, secret_key, aad_server, &state);
 		  }
+		  else {
+			  mocker10 = 10;
+			  process_initial_packet(rx_buffer);
+		  }
+
 		  uint32_t end_cycles = DWT->CYCCNT;
 		  uint32_t cycles = end_cycles - start_cycles;
 		  time_parsing_frame_us = (float)cycles / (SystemCoreClock / 1000000.0);
@@ -498,9 +584,25 @@ static void MX_GPIO_Init(void)
 {
 /* USER CODE BEGIN MX_GPIO_Init_1 */
 /* USER CODE END MX_GPIO_Init_1 */
-
+	GPIO_InitTypeDef GPIO_InitStruct = {0};
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOA_CLK_ENABLE();
+
+  // Cấu hình PA3 (USART2_RX) với pull-up
+  GPIO_InitStruct.Pin = GPIO_PIN_3;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+  GPIO_InitStruct.Alternate = GPIO_AF7_USART2;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  // Cấu hình PA2 (USART2_TX) nếu cần
+  GPIO_InitStruct.Pin = GPIO_PIN_2;
+  GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+  GPIO_InitStruct.Alternate = GPIO_AF7_USART2;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
 /* USER CODE BEGIN MX_GPIO_Init_2 */
 /* USER CODE END MX_GPIO_Init_2 */
