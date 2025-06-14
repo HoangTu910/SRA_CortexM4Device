@@ -117,6 +117,9 @@ static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
 void aes_encrypt();
+void aes_gcm_encrypt();
+void benchmark_encrypt_aes();
+void benchmark_encrypt_armv7(uint8_t heart_rate, uint8_t spo2, uint8_t temperature, uint8_t acceleration, uint16_t dataLen, uint8_t *secret_key);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -164,14 +167,13 @@ static bool process_initial_packet(uint8_t* buffer) {
     
     // Extract session_key_index from data field (big-endian)
     session_key_index = (uint16_t)(buffer[data_offset] << 8) | buffer[data_offset + 1];
-    
+    session_key_index--;
     // Verify EOF
     const size_t eof_offset = data_offset + AAD_MAX_SIZE;
     if (!check_trailer(buffer, eof_offset, eof_offset + EOF_SIZE - 1)) {
         send_error(&huart2, STATE_ERROR_TRAILER_MISMATCH);
         return false;
     }
-
     return true;
 }
 
@@ -184,7 +186,7 @@ static bool process_trigger_packet(uint8_t* buffer, uint8_t* aad, SystemState_t*
 
     // Calculate offsets based on UartFrameSTM32Trigger structure
     const size_t trigger_offset = SOF_SIZE; 
-    const size_t identifier_offset = trigger_offset + 1; l
+    const size_t identifier_offset = trigger_offset + 1;
     const size_t aad_len_offset = identifier_offset + IDENTIFIER_ID_SIZE;  
     const size_t aad_offset = aad_len_offset + AAD_MAX_SIZE_LEN;  
     const size_t eof_offset = aad_offset + AAD_MAX_SIZE; 
@@ -239,15 +241,17 @@ static bool process_trigger_packet(uint8_t* buffer, uint8_t* aad, SystemState_t*
 
     // Measure session key generation time
     uint32_t start_cycles_session = DWT->CYCCNT;
+    // Generate new session key
+    mocker1 = session_key_index;
     // Update session key index based on packet type
     packetType == 0x01 ? ++session_key_index : session_key_index;
-    // Generate new session key
     armv7_derive_session_key(session_key, SECRET_KEY_SIZE - AUTH_TAG_SIZE,
                             encrypt_key, SECRET_KEY_SIZE - AUTH_TAG_SIZE,
                             aad_server, aad_length, session_key_index);
     uint32_t end_cycles_session = DWT->CYCCNT;
     time_frame_construct_session_key_us = (float)(end_cycles_session - start_cycles_session) /
                                         (SystemCoreClock / 1000000.0);
+    benchmark_encrypt_aes();
 
     // Handle session key index overflow
     if (session_key_index >= MAX_SESSION_KEYS) {
@@ -259,12 +263,12 @@ static bool process_trigger_packet(uint8_t* buffer, uint8_t* aad, SystemState_t*
     mocker9 = encrypt_key[1];
 
     // Construct and send response frame
-    uint32_t start_cycles = DWT->CYCCNT;
+    uint32_t start_cycles_f = DWT->CYCCNT;
     Frame_t frame = construct_frame(heart_rate, spo2, temperature, acceleration,
                                   dataLen + ASCON_TAG_SIZE, session_key,
                                   aad_server, aad_length);
-    uint32_t end_cycles = DWT->CYCCNT;
-    time_frame_construct_us = (float)(end_cycles - start_cycles) /
+    uint32_t end_cycles_f = DWT->CYCCNT;
+    time_frame_construct_us = (float)(end_cycles_f - start_cycles_f) /
                              (SystemCoreClock / 1000000.0);
 
     // Transmit frame
@@ -278,7 +282,8 @@ static bool process_trigger_packet(uint8_t* buffer, uint8_t* aad, SystemState_t*
 }
 
 static bool process_key_exchange_packet(uint8_t* buffer, uint8_t* secret_key, uint8_t* aad, SystemState_t* state) {
-    const uint8_t expected_identifier[IDENTIFIER_ID_SIZE] = {0x01, 0x02, 0x03, 0x04};
+	uint32_t start_cycles_ = DWT->CYCCNT;
+	const uint8_t expected_identifier[IDENTIFIER_ID_SIZE] = {0x01, 0x02, 0x03, 0x04};
     uint8_t encrypted_secret_key[SECRET_KEY_SIZE];
     uint8_t nonce[NONCE_SIZE];
     uint8_t received_auth_tag[AUTH_TAG_SIZE];
@@ -332,7 +337,9 @@ static bool process_key_exchange_packet(uint8_t* buffer, uint8_t* secret_key, ui
         send_error(&huart2, STATE_ERROR_TRAILER_MISMATCH);
         return false;
     }
-
+    uint32_t end_cycles_ = DWT->CYCCNT;
+    time_parsing_frame_us = (float)(end_cycles_ - start_cycles_) /
+            						(SystemCoreClock / 1000000.0);
     // Decrypt and verify
     unsigned long long decrypted_len;
     int result = crypto_aead_decrypt(
@@ -379,14 +386,13 @@ void benchmark_encrypt(uint8_t heart_rate, uint8_t spo2, uint8_t temperature, ui
 												0x02, 0x03, 0x04, 0x05, 0x01, 0x02,
 												0x03, 0x04, 0x05, 0x06};
 	uint32_t start_cycles = DWT->CYCCNT;
-	crypto_aead_encrypt(ciphertext, &ciphertext_len, message, message_len, associated_data, associated_data_len, NULL, nonce, secret_key);
+	armv7_crypto_aead_encrypt(ciphertext, &ciphertext_len, message, message_len, associated_data, associated_data_len, NULL, nonce, secret_key);
 	uint32_t end_cycles = DWT->CYCCNT;
 	uint32_t cycles = end_cycles - start_cycles;
 	time_encrypt_us = (float)cycles / (SystemCoreClock / 1000000.0);
 }
 
 void benchmark_encrypt_aes(){
-
 	uint32_t start_cycles = DWT->CYCCNT;
 	aes_gcm_encrypt();
 	uint32_t end_cycles = DWT->CYCCNT;
@@ -490,10 +496,6 @@ int main(void)
 			  mocker10 = 10;
 			  process_initial_packet(rx_buffer);
 		  }
-
-		  uint32_t end_cycles = DWT->CYCCNT;
-		  uint32_t cycles = end_cycles - start_cycles;
-		  time_parsing_frame_us = (float)cycles / (SystemCoreClock / 1000000.0);
 	  }
   }
   /* USER CODE END 3 */
@@ -647,6 +649,7 @@ void aes_encrypt()
     if (error_status != AES_SUCCESS) {
         while (1); // Handle error
     }
+    mocker10 = error_status;
 }
 
 void aes_gcm_encrypt()
