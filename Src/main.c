@@ -18,12 +18,14 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+#include "DHT.h"
+#include "Device.h"
 #include "crypto.h"
 #include "armv7_hash.h"
 #include <stdbool.h>
-/* Private includes ----------------------------------------------------------*/
-/* USER CODE BEGIN Includes */
-#include "Device.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -51,12 +53,15 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+TIM_HandleTypeDef htim1;
+
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
 void resetUART(UART_HandleTypeDef *huart);
 
 /*Mocker for debugging*/
+uint8_t temp, humidity;
 float time_encrypt_us;
 float time_frame_construct_session_key_us;
 float time_frame_construct_us;
@@ -76,8 +81,10 @@ uint8_t mocker7 = 0;
 uint8_t mocker8 = 0;
 uint8_t mocker9 = 0;
 uint8_t mocker10 = 0;
+uint8_t is_encrypt_success = 0;
+uint8_t is_session_key_complete = 0;
 /*Mocker for debugging*/
-
+DHT_Name DHT1;
 volatile uint8_t rxByteReceived = 0;
 volatile uint32_t rx_index = 0;
 volatile uint8_t rx_complete = 0;
@@ -115,6 +122,7 @@ uint8_t tag[AES_GCM_TAG_SIZE];
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
+static void MX_TIM1_Init(void);
 /* USER CODE BEGIN PFP */
 void aes_encrypt();
 void aes_gcm_encrypt();
@@ -135,8 +143,8 @@ static bool check_header(uint8_t* buffer) {
 }
 
 static bool check_trailer(uint8_t* buffer, uint8_t pos1, uint8_t pos2) {
-	mocker1 = buffer[pos1];
-	mocker2 = buffer[pos2];
+//	mocker1 = buffer[pos1];
+//	mocker2 = buffer[pos2];
     return (buffer[pos1] == T1 && buffer[pos2] == T2);
 }
 
@@ -245,10 +253,12 @@ static bool process_trigger_packet(uint8_t* buffer, uint8_t* aad, SystemState_t*
     mocker1 = session_key_index;
     // Update session key index based on packet type
     packetType == 0x01 ? ++session_key_index : session_key_index;
+    is_session_key_complete = 0;
     armv7_derive_session_key(session_key, SECRET_KEY_SIZE - AUTH_TAG_SIZE,
                             encrypt_key, SECRET_KEY_SIZE - AUTH_TAG_SIZE,
                             aad_server, aad_length, session_key_index);
     uint32_t end_cycles_session = DWT->CYCCNT;
+    is_session_key_complete = 1;
     time_frame_construct_session_key_us = (float)(end_cycles_session - start_cycles_session) /
                                         (SystemCoreClock / 1000000.0);
     benchmark_encrypt_aes();
@@ -264,10 +274,12 @@ static bool process_trigger_packet(uint8_t* buffer, uint8_t* aad, SystemState_t*
 
     // Construct and send response frame
     uint32_t start_cycles_f = DWT->CYCCNT;
+    is_encrypt_success = 0;
     Frame_t frame = construct_frame(heart_rate, spo2, temperature, acceleration,
                                   dataLen + ASCON_TAG_SIZE, session_key,
                                   aad_server, aad_length);
     uint32_t end_cycles_f = DWT->CYCCNT;
+    is_encrypt_success = 1;
     time_frame_construct_us = (float)(end_cycles_f - start_cycles_f) /
                              (SystemCoreClock / 1000000.0);
 
@@ -369,9 +381,12 @@ void generate_random_sensor_data(uint8_t *heart_rate, uint8_t *spo2, uint8_t *te
         srand((unsigned int)time(NULL));
         seeded = 1;
     }
-    *heart_rate = (uint8_t)(rand() % 100 + 60);
+    DHT_ReadTempHum(&DHT1);
+    temp = (int)DHT1.Temp;
+    humidity = (int)DHT1.Humi;
+    *heart_rate = /*(uint8_t)(rand() % 100 + 60)*/ humidity;
     *spo2 = (uint8_t)(rand() % 10 + 90);
-    *temperature = (uint8_t)(rand() % 5 + 35);
+    *temperature = /*(uint8_t)(rand() % 5 + 35);*/ temp;
     *acceleration = (uint8_t)(rand() % 21);
 }
 
@@ -443,6 +458,7 @@ int main(void)
   MX_USART2_UART_Init();
 
   /* USER CODE END Init */
+
   /* Configure the system clock */
   SystemClock_Config();
 
@@ -453,9 +469,13 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USART2_UART_Init();
+  MX_TIM1_Init();
+  /* USER CODE BEGIN 2 */
+  HAL_TIM_Base_Start(&htim1);
   enable_dwt();
   HAL_UART_Receive_IT(&huart2, rx_buffer, TOTAL_RECEIVE_KEY_FROM_ESP32);
-  /* USER CODE BEGIN 2 */
+
+  DHT_Init(&DHT1, DHT11, &htim1, GPIOC, GPIO_PIN_1);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -497,6 +517,10 @@ int main(void)
 			  process_initial_packet(rx_buffer);
 		  }
 	  }
+//	  DHT_ReadTempHum(&DHT1);
+//	  temp = (int)DHT1.Temp;
+//	  humidity = (int)DHT1.Humi;
+//	  HAL_Delay(1000);
   }
   /* USER CODE END 3 */
 }
@@ -543,6 +567,52 @@ void SystemClock_Config(void)
 }
 
 /**
+  * @brief TIM1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM1_Init(void)
+{
+
+  /* USER CODE BEGIN TIM1_Init 0 */
+
+  /* USER CODE END TIM1_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM1_Init 1 */
+
+  /* USER CODE END TIM1_Init 1 */
+  htim1.Instance = TIM1;
+  htim1.Init.Prescaler = 15;
+  htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim1.Init.Period = 65535;
+  htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim1.Init.RepetitionCounter = 0;
+  htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim1, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim1, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM1_Init 2 */
+
+  /* USER CODE END TIM1_Init 2 */
+
+}
+
+/**
   * @brief USART2 Initialization Function
   * @param None
   * @retval None
@@ -569,12 +639,12 @@ static void MX_USART2_UART_Init(void)
   {
     Error_Handler();
   }
-  __HAL_UART_ENABLE_IT(&huart2, UART_IT_RXNE);
-  HAL_NVIC_SetPriority(USART2_IRQn, 0, 0);
-  HAL_NVIC_EnableIRQ(USART2_IRQn);
   /* USER CODE BEGIN USART2_Init 2 */
-
+  __HAL_UART_ENABLE_IT(&huart2, UART_IT_RXNE);
+    HAL_NVIC_SetPriority(USART2_IRQn, 0, 0);
+    HAL_NVIC_EnableIRQ(USART2_IRQn);
   /* USER CODE END USART2_Init 2 */
+
 }
 
 /**
@@ -584,12 +654,26 @@ static void MX_USART2_UART_Init(void)
   */
 static void MX_GPIO_Init(void)
 {
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
 /* USER CODE BEGIN MX_GPIO_Init_1 */
 /* USER CODE END MX_GPIO_Init_1 */
-	GPIO_InitTypeDef GPIO_InitStruct = {0};
+
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOH_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
 
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_1, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : PC1 */
+  GPIO_InitStruct.Pin = GPIO_PIN_1;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+/* USER CODE BEGIN MX_GPIO_Init_2 */
   // Cấu hình PA3 (USART2_RX) với pull-up
   GPIO_InitStruct.Pin = GPIO_PIN_3;
   GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
@@ -598,15 +682,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Alternate = GPIO_AF7_USART2;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  // Cấu hình PA2 (USART2_TX) nếu cần
+  // Cấu hình PA2 (USART2_TX)
   GPIO_InitStruct.Pin = GPIO_PIN_2;
   GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
   GPIO_InitStruct.Alternate = GPIO_AF7_USART2;
-  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-/* USER CODE BEGIN MX_GPIO_Init_2 */
+ HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 /* USER CODE END MX_GPIO_Init_2 */
 }
 
