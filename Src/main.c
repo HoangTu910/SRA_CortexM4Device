@@ -81,6 +81,8 @@ uint8_t mocker7 = 0;
 uint8_t mocker8 = 0;
 uint8_t mocker9 = 0;
 uint8_t mocker10 = 0;
+uint8_t is_encrypt_success = 0;
+uint8_t is_session_key_complete = 0;
 /*Mocker for debugging*/
 DHT_Name DHT1;
 volatile uint8_t rxByteReceived = 0;
@@ -141,8 +143,8 @@ static bool check_header(uint8_t* buffer) {
 }
 
 static bool check_trailer(uint8_t* buffer, uint8_t pos1, uint8_t pos2) {
-	mocker1 = buffer[pos1];
-	mocker2 = buffer[pos2];
+//	mocker1 = buffer[pos1];
+//	mocker2 = buffer[pos2];
     return (buffer[pos1] == T1 && buffer[pos2] == T2);
 }
 
@@ -251,10 +253,12 @@ static bool process_trigger_packet(uint8_t* buffer, uint8_t* aad, SystemState_t*
     mocker1 = session_key_index;
     // Update session key index based on packet type
     packetType == 0x01 ? ++session_key_index : session_key_index;
+    is_session_key_complete = 0;
     armv7_derive_session_key(session_key, SECRET_KEY_SIZE - AUTH_TAG_SIZE,
                             encrypt_key, SECRET_KEY_SIZE - AUTH_TAG_SIZE,
                             aad_server, aad_length, session_key_index);
     uint32_t end_cycles_session = DWT->CYCCNT;
+    is_session_key_complete = 1;
     time_frame_construct_session_key_us = (float)(end_cycles_session - start_cycles_session) /
                                         (SystemCoreClock / 1000000.0);
     benchmark_encrypt_aes();
@@ -270,10 +274,12 @@ static bool process_trigger_packet(uint8_t* buffer, uint8_t* aad, SystemState_t*
 
     // Construct and send response frame
     uint32_t start_cycles_f = DWT->CYCCNT;
+    is_encrypt_success = 0;
     Frame_t frame = construct_frame(heart_rate, spo2, temperature, acceleration,
                                   dataLen + ASCON_TAG_SIZE, session_key,
                                   aad_server, aad_length);
     uint32_t end_cycles_f = DWT->CYCCNT;
+    is_encrypt_success = 1;
     time_frame_construct_us = (float)(end_cycles_f - start_cycles_f) /
                              (SystemCoreClock / 1000000.0);
 
@@ -378,9 +384,9 @@ void generate_random_sensor_data(uint8_t *heart_rate, uint8_t *spo2, uint8_t *te
     DHT_ReadTempHum(&DHT1);
     temp = (int)DHT1.Temp;
     humidity = (int)DHT1.Humi;
-    *heart_rate = (uint8_t)(rand() % 100 + 60);
+    *heart_rate = /*(uint8_t)(rand() % 100 + 60)*/ humidity;
     *spo2 = (uint8_t)(rand() % 10 + 90);
-    *temperature = (uint8_t)(rand() % 5 + 35);
+    *temperature = /*(uint8_t)(rand() % 5 + 35);*/ temp;
     *acceleration = (uint8_t)(rand() % 21);
 }
 
@@ -511,6 +517,10 @@ int main(void)
 			  process_initial_packet(rx_buffer);
 		  }
 	  }
+//	  DHT_ReadTempHum(&DHT1);
+//	  temp = (int)DHT1.Temp;
+//	  humidity = (int)DHT1.Humi;
+//	  HAL_Delay(1000);
   }
   /* USER CODE END 3 */
 }

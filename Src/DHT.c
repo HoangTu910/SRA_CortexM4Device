@@ -11,6 +11,12 @@ Huong dan su dung:
 //************************** Low Level Layer ********************************************************//
 #include "delay_timer.h"
 
+extern mocker1;
+extern mocker2;
+extern mocker3;
+
+#define DHT_TIMEOUT_THRESHOLD 500
+
 static void DHT_DelayInit(DHT_Name* DHT)
 {
 	DELAY_TIM_Init(DHT->Timer);
@@ -24,17 +30,17 @@ static void DHT_SetPinOut(DHT_Name* DHT)
 {
 	GPIO_InitTypeDef GPIO_InitStruct = {0};
 	GPIO_InitStruct.Pin = DHT->Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(DHT->PORT, &GPIO_InitStruct);
+	GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+	HAL_GPIO_Init(DHT->PORT, &GPIO_InitStruct);
 }
 static void DHT_SetPinIn(DHT_Name* DHT)
 {
 	GPIO_InitTypeDef GPIO_InitStruct = {0};
 	GPIO_InitStruct.Pin = DHT->Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(DHT->PORT, &GPIO_InitStruct);
+	GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+	GPIO_InitStruct.Pull = GPIO_PULLUP;
+	HAL_GPIO_Init(DHT->PORT, &GPIO_InitStruct);
 }
 static void DHT_WritePin(DHT_Name* DHT, uint8_t Value)
 {
@@ -44,46 +50,67 @@ static uint8_t DHT_ReadPin(DHT_Name* DHT)
 {
 	uint8_t Value;
 	Value =  HAL_GPIO_ReadPin(DHT->PORT, DHT->Pin);
+	mocker3 = Value;
 	return Value;
 }
 //********************************* Middle level Layer ****************************************************//
 static uint8_t DHT_Start(DHT_Name* DHT)
 {
-	uint8_t Response = 0;
-	DHT_SetPinOut(DHT);  
-	DHT_WritePin(DHT, 0);
-	DHT_DelayUs(DHT, DHT->Type);   
-	DHT_SetPinIn(DHT);    
-	DHT_DelayUs(DHT, 40); 
-	if (!DHT_ReadPin(DHT))
-	{
-		DHT_DelayUs(DHT, 40); 
-		if(DHT_ReadPin(DHT))
-		{
-			Response = 1;   
-		}
-		else Response = 0;  
-	}		
-	while(DHT_ReadPin(DHT));
+    uint8_t Response = 0;
+    DHT_SetPinOut(DHT);
+    DHT_WritePin(DHT, 0);
+    DHT_DelayUs(DHT, DHT->Type); 
+    DHT_SetPinIn(DHT);
+    DHT_DelayUs(DHT, 40); 
 
-	return Response;
+    uint32_t timeout = 0;
+    while(DHT_ReadPin(DHT))
+    {
+        if (++timeout > DHT_TIMEOUT_THRESHOLD) return 0; 
+    }
+
+    // Wait for DHT to pull pin high (Response 2)
+    timeout = 0; // Reset timeout
+    while(!DHT_ReadPin(DHT)) // While pin is LOW
+    {
+        if (++timeout > DHT_TIMEOUT_THRESHOLD) return 0;
+    }
+
+    // Wait for DHT to pull pin low again (End of response)
+    timeout = 0; // Reset timeout
+    while(DHT_ReadPin(DHT)) // While pin is HIGH
+    {
+        if (++timeout > DHT_TIMEOUT_THRESHOLD) return 0; 
+    }
+
+    Response = 1; // Indicate success
+
+    return Response; // Return 1 for success, 0 for failure
 }
 static uint8_t DHT_Read(DHT_Name* DHT)
 {
-	uint8_t Value = 0;
-	DHT_SetPinIn(DHT);
-	for(int i = 0; i<8; i++)
-	{
-		while(!DHT_ReadPin(DHT));
-		DHT_DelayUs(DHT, 40);
-		if(!DHT_ReadPin(DHT))
-		{
-			Value &= ~(1<<(7-i));	
-		}
-		else Value |= 1<<(7-i);
-		while(DHT_ReadPin(DHT));
-	}
-	return Value;
+    uint8_t Value = 0;
+    DHT_SetPinIn(DHT);
+    for(int i = 0; i<8; i++)
+    {
+        uint32_t timeout = 0;
+        while(!DHT_ReadPin(DHT)) {
+            if (++timeout > 1000) return 0;
+        }
+        
+        DHT_DelayUs(DHT, 30); 
+        
+        if(DHT_ReadPin(DHT)) 
+        {
+            Value |= (1 << (7 - i));
+        }
+
+        timeout = 0; 
+        while(DHT_ReadPin(DHT)) {
+            if (++timeout > DHT_TIMEOUT_THRESHOLD) return 0; // Timeout
+        }
+    }
+    return Value; // Trả về byte đọc được
 }
 
 //************************** High Level Layer ********************************************************//
